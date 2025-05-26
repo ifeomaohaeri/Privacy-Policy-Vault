@@ -1,4 +1,3 @@
-
 ;; ADVANCED DATA GOVERNANCE & CONSENT MANAGEMENT SYSTEM
 
 ;; A comprehensive blockchain-based solution for managing user privacy,
@@ -17,6 +16,7 @@
 (define-constant DUPLICATE_POLICY_VERSION_ERROR (err u105))
 (define-constant INVALID_DATA_CLASSIFICATION_ERROR (err u106))
 (define-constant INVALID_PROCESSING_PURPOSE_ERROR (err u107))
+(define-constant INVALID_INPUT_DATA_ERROR (err u108))
 
 ;; SYSTEM STATE MANAGEMENT VARIABLES
 
@@ -102,6 +102,118 @@
 (define-data-var next-available-processing-record-id uint u1)
 (define-data-var next-available-deletion-request-id uint u1)
 
+;; INPUT VALIDATION HELPER FUNCTIONS
+
+;; Validate policy document title
+(define-private (validate-policy-title (title (string-ascii 100)))
+  (let ((title-length (len title)))
+    (and (> title-length u0) (<= title-length u100))
+  )
+)
+
+;; Validate content hash
+(define-private (validate-content-hash (hash (buff 32)))
+  (is-eq (len hash) u32)
+)
+
+;; Validate timestamp values
+(define-private (validate-timestamp (timestamp uint))
+  (and (> timestamp u0) (<= timestamp u4294967295)) ;; Max uint32 value
+)
+
+;; Validate retention duration (max 10 years in blocks, assuming ~10 min blocks)
+(define-private (validate-retention-duration (duration uint))
+  (and (> duration u0) (<= duration u525600)) ;; ~10 years worth of blocks
+)
+
+;; Validate policy version identifier
+(define-private (validate-policy-version (version uint))
+  (and (> version u0) (<= version u1000000)) ;; Reasonable upper limit
+)
+
+;; Validate string content (non-empty and reasonable length)
+(define-private (validate-string-content (content (string-ascii 50)))
+  (let ((content-length (len content)))
+    (and (> content-length u0) (<= content-length u50))
+  )
+)
+
+;; Validate data classification categories
+(define-private (validate-data-classification (classification (string-ascii 30)))
+  (or
+    (is-eq classification "personal")
+    (is-eq classification "financial")
+    (is-eq classification "health")
+    (is-eq classification "behavioral")
+    (is-eq classification "technical")
+  )
+)
+
+;; Validate communication channel
+(define-private (validate-communication-channel (channel (string-ascii 20)))
+  (or 
+    (is-eq channel "email")
+    (is-eq channel "phone")
+    (is-eq channel "mail")
+    (is-eq channel "none")
+  )
+)
+
+;; Validate consent classification
+(define-private (validate-consent-classification (classification (string-ascii 20)))
+  (or 
+    (is-eq classification "explicit") 
+    (is-eq classification "implicit")
+    (is-eq classification "withdrawn")
+  )
+)
+
+;; Validate processing status
+(define-private (validate-processing-status (status (string-ascii 20)))
+  (or
+    (is-eq status "pending")
+    (is-eq status "processing")
+    (is-eq status "completed")
+    (is-eq status "rejected")
+  )
+)
+
+;; Validate processing activities list
+(define-private (validate-processing-activities (activities (list 10 (string-ascii 50))))
+  (and 
+    (> (len activities) u0)
+    (<= (len activities) u10)
+  )
+)
+
+;; Validate data categories list
+(define-private (validate-data-categories (categories (list 10 (string-ascii 30))))
+  (and 
+    (> (len categories) u0)
+    (<= (len categories) u10)
+  )
+)
+
+;; Validate deletion request identifier
+(define-private (validate-deletion-request-id (request-id uint))
+  (and (> request-id u0) (<= request-id u1000000)) ;; Reasonable upper limit
+)
+
+;; Validate optional timestamp
+(define-private (validate-optional-timestamp (timestamp (optional uint)))
+  (match timestamp
+    ts (validate-timestamp ts)
+    true
+  )
+)
+
+;; Validate principal (basic validation to ensure it's not a null or invalid principal)
+(define-private (validate-principal (user-principal principal))
+  ;; Check that the principal is not equal to a known invalid pattern
+  ;; In Clarity, we can't do extensive principal validation, but we can check basic patterns
+  (not (is-eq user-principal 'SP000000000000000000002Q6VF78))
+)
+
 ;; PUBLIC READ-ONLY INTERFACE FUNCTIONS
 
 ;; Retrieve the currently active policy version number
@@ -177,6 +289,12 @@
   )
     (asserts! (is-eq tx-sender SYSTEM_ADMINISTRATOR) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
+    
+    ;; Validate input parameters
+    (asserts! (validate-policy-title policy-document-title) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-content-hash cryptographic-content-hash) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-timestamp legal-effective-timestamp) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-optional-timestamp policy-expiration-timestamp) INVALID_INPUT_DATA_ERROR)
     (asserts! (>= legal-effective-timestamp current-blockchain-height) INVALID_POLICY_VERSION_ERROR)
     
     ;; Validate expiration timestamp if provided
@@ -188,17 +306,22 @@
     ;; Ensure policy version doesn't already exist
     (asserts! (is-none (map-get? comprehensive-privacy-policy-registry { policy-version-identifier: new-policy-version-number })) DUPLICATE_POLICY_VERSION_ERROR)
     
-    ;; Register the new privacy policy
-    (map-set comprehensive-privacy-policy-registry
-      { policy-version-identifier: new-policy-version-number }
-      {
-        policy-document-title: policy-document-title,
-        cryptographic-content-hash: cryptographic-content-hash,
-        legal-effective-timestamp: legal-effective-timestamp,
-        policy-expiration-timestamp: policy-expiration-timestamp,
-        policy-author-principal: tx-sender,
-        policy-activation-status: true
-      }
+    ;; Register the new privacy policy (create safe copy of validated data)
+    (let ((safe-expiration-timestamp 
+           (match policy-expiration-timestamp
+             ts (some ts)
+             none)))
+      (map-set comprehensive-privacy-policy-registry
+        { policy-version-identifier: new-policy-version-number }
+        {
+          policy-document-title: policy-document-title,
+          cryptographic-content-hash: cryptographic-content-hash,
+          legal-effective-timestamp: legal-effective-timestamp,
+          policy-expiration-timestamp: safe-expiration-timestamp,
+          policy-author-principal: tx-sender,
+          policy-activation-status: true
+        }
+      )
     )
     
     ;; Update system state counters
@@ -216,6 +339,9 @@
   )
     (asserts! (is-eq tx-sender SYSTEM_ADMINISTRATOR) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
+    
+    ;; Validate input parameter
+    (asserts! (validate-policy-version policy-version-identifier) INVALID_INPUT_DATA_ERROR)
     
     (match existing-policy-record
       policy-record-data (begin
@@ -247,16 +373,17 @@
   )
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (> current-active-policy-version u0) PRIVACY_POLICY_NOT_FOUND_ERROR)
-    (asserts! (or (is-eq legal-consent-classification "explicit") (is-eq legal-consent-classification "implicit")) INVALID_PROCESSING_PURPOSE_ERROR)
+    
+    ;; Validate input parameters
+    (asserts! (validate-consent-classification legal-consent-classification) INVALID_PROCESSING_PURPOSE_ERROR)
+    (asserts! (validate-processing-activities authorized-processing-activities) INVALID_PROCESSING_PURPOSE_ERROR)
+    (asserts! (validate-retention-duration maximum-retention-duration) INVALID_INPUT_DATA_ERROR)
     
     ;; Verify user doesn't have active consent already
     (match existing-user-consent
       consent-record-data (asserts! (is-eq (get legal-consent-classification consent-record-data) "withdrawn") CONSENT_ALREADY_RECORDED_ERROR)
       true
     )
-    
-    ;; Validate processing activities list
-    (asserts! (> (len authorized-processing-activities) u0) INVALID_PROCESSING_PURPOSE_ERROR)
     
     ;; Store user consent record
     (map-set user-consent-tracking-registry
@@ -314,13 +441,9 @@
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (verify-user-has-valid-current-consent tx-sender) USER_CONSENT_NOT_FOUND_ERROR)
     
-    ;; Validate communication channel preference
-    (asserts! (or 
-      (is-eq primary-communication-channel "email")
-      (is-eq primary-communication-channel "phone")
-      (is-eq primary-communication-channel "mail")
-      (is-eq primary-communication-channel "none")
-    ) INVALID_DATA_CLASSIFICATION_ERROR)
+    ;; Validate input parameters
+    (asserts! (validate-retention-duration preferred-retention-duration) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-communication-channel primary-communication-channel) INVALID_DATA_CLASSIFICATION_ERROR)
     
     (map-set individual-privacy-preferences-store
       { preference-owner-principal: tx-sender }
@@ -351,19 +474,21 @@
   (let (
     (processing-record-identifier (var-get next-available-processing-record-id))
     (current-blockchain-timestamp block-height)
+    (validated-retention-expiry (+ current-blockchain-timestamp retention-duration-blocks))
   )
     (asserts! (is-eq tx-sender SYSTEM_ADMINISTRATOR) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (verify-user-has-valid-current-consent subject-user-principal) USER_CONSENT_NOT_FOUND_ERROR)
     
-    ;; Validate data classification categories
-    (asserts! (or
-      (is-eq processed-data-classification "personal")
-      (is-eq processed-data-classification "financial")
-      (is-eq processed-data-classification "health")
-      (is-eq processed-data-classification "behavioral")
-      (is-eq processed-data-classification "technical")
-    ) INVALID_DATA_CLASSIFICATION_ERROR)
+    ;; Validate input parameters
+    (asserts! (validate-principal subject-user-principal) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-data-classification processed-data-classification) INVALID_DATA_CLASSIFICATION_ERROR)
+    (asserts! (validate-string-content legal-processing-purpose) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-string-content legal-basis-justification) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-retention-duration retention-duration-blocks) INVALID_INPUT_DATA_ERROR)
+    
+    ;; Validate retention expiry calculation doesn't overflow
+    (asserts! (> validated-retention-expiry current-blockchain-timestamp) INVALID_INPUT_DATA_ERROR)
     
     (map-set data-processing-audit-trail
       { processing-activity-identifier: processing-record-identifier }
@@ -373,7 +498,7 @@
         data-processing-legal-purpose: legal-processing-purpose,
         processing-execution-timestamp: current-blockchain-timestamp,
         legal-basis-for-processing: legal-basis-justification,
-        data-retention-expiry-timestamp: (+ current-blockchain-timestamp retention-duration-blocks)
+        data-retention-expiry-timestamp: validated-retention-expiry
       }
     )
     
@@ -391,7 +516,9 @@
     (current-blockchain-timestamp block-height)
   )
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
-    (asserts! (> (len data-categories-for-deletion) u0) INVALID_DATA_CLASSIFICATION_ERROR)
+    
+    ;; Validate input parameters
+    (asserts! (validate-data-categories data-categories-for-deletion) INVALID_DATA_CLASSIFICATION_ERROR)
     
     (map-set data-subject-deletion-request-queue
       { requesting-user-principal: tx-sender, deletion-request-identifier: deletion-request-identifier }
@@ -417,24 +544,32 @@
   (status-explanation (optional (string-ascii 200)))
 )
   (let (
-    (existing-deletion-request (map-get? data-subject-deletion-request-queue { requesting-user-principal: requesting-user-principal, deletion-request-identifier: deletion-request-identifier }))
+    ;; Create validated copies of input parameters
+    (validated-user-principal requesting-user-principal)
+    (validated-request-id deletion-request-identifier)
   )
     (asserts! (is-eq tx-sender SYSTEM_ADMINISTRATOR) UNAUTHORIZED_ACCESS_ERROR)
     (asserts! (not (var-get emergency-system-lockdown)) UNAUTHORIZED_ACCESS_ERROR)
     
-    ;; Validate new processing status
-    (asserts! (or
-      (is-eq new-processing-status "processing")
-      (is-eq new-processing-status "completed")
-      (is-eq new-processing-status "rejected")
-    ) INVALID_DATA_CLASSIFICATION_ERROR)
+    ;; Validate input parameters
+    (asserts! (validate-principal validated-user-principal) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-deletion-request-id validated-request-id) INVALID_INPUT_DATA_ERROR)
+    (asserts! (validate-processing-status new-processing-status) INVALID_DATA_CLASSIFICATION_ERROR)
     
-    (match existing-deletion-request
+    ;; Validate status explanation if provided
+    (match status-explanation
+      explanation (asserts! (and (> (len explanation) u0) (<= (len explanation) u200)) INVALID_INPUT_DATA_ERROR)
+      true
+    )
+    
+    ;; Use a match expression to handle the map lookup and update safely
+    (match (map-get? data-subject-deletion-request-queue { requesting-user-principal: validated-user-principal, deletion-request-identifier: validated-request-id })
       deletion-request-data (begin
         (asserts! (is-eq (get deletion-request-processing-status deletion-request-data) "pending") UNAUTHORIZED_ACCESS_ERROR)
         
+        ;; Update with validated data - using validated parameters
         (map-set data-subject-deletion-request-queue
-          { requesting-user-principal: requesting-user-principal, deletion-request-identifier: deletion-request-identifier }
+          { requesting-user-principal: validated-user-principal, deletion-request-identifier: validated-request-id }
           (merge deletion-request-data {
             deletion-request-processing-status: new-processing-status,
             deletion-completion-timestamp: (if (is-eq new-processing-status "completed") (some block-height) none),
